@@ -6,6 +6,11 @@ use Illuminate\Http\Request;
 use LINE\Clients\MessagingApi\Api\MessagingApiApi;
 use LINE\Clients\MessagingApi\Model\ReplyMessageRequest;
 use LINE\Clients\MessagingApi\Model\TextMessage;
+use LINE\Clients\MessagingApi\Model\TemplateMessage;
+use LINE\Clients\MessagingApi\Model\ButtonsTemplate;
+use LINE\Clients\MessagingApi\Model\CarouselTemplate;
+use LINE\Clients\MessagingApi\Model\CarouselColumn;
+use LINE\Clients\MessagingApi\Model\MessageAction;
 use LINE\Constants\HTTPHeader;
 use LINE\Parser\EventRequestParser;
 use LINE\Webhook\Model\MessageEvent;
@@ -15,6 +20,7 @@ use LINE\Webhook\Model\FollowEvent;
 class LineBotController extends Controller
 {
     private MessagingApiApi $bot;
+    private string $baseUrl;
 
     public function __construct()
     {
@@ -22,6 +28,7 @@ class LineBotController extends Controller
         $config->setAccessToken(config('services.line.channel_access_token'));
         $client = new \GuzzleHttp\Client();
         $this->bot = new MessagingApiApi($client, $config);
+        $this->baseUrl = config('app.url');
     }
 
     public function webhook(Request $request)
@@ -54,68 +61,148 @@ class LineBotController extends Controller
     {
         $message = new TextMessage([
             'type' => 'text',
-            'text' => "友だち追加ありがとうございます！\n\n「問題社員リスク診断」へようこそ。\n\n「診断開始」と送ってください。",
+            'text' => "友だち追加ありがとうございます！\n\n「問題社員リスク診断」へようこそ。\n\n下のメニューから「診断開始」をタップしてください。",
         ]);
-
         $this->replyMessage($event->getReplyToken(), $message);
     }
 
     private function handleTextMessage(MessageEvent $event): void
     {
         /** @var TextMessageContent $messageContent */
-        $messageContent = $event->getMessage();
-        $text = $messageContent->getText();
+        $text = $event->getMessage()->getText();
         $userId = $event->getSource()->getUserId();
 
-        $replyText = $this->getReply($userId, $text);
-
-        $message = new TextMessage([
-            'type' => 'text',
-            'text' => $replyText,
-        ]);
-
+        $message = $this->getReplyMessage($userId, $text);
         $this->replyMessage($event->getReplyToken(), $message);
     }
 
-    private function getReply(string $userId, string $text): string
+    private function getReplyMessage(string $userId, string $text): TextMessage|TemplateMessage
     {
         $session = cache()->get("diagnosis:{$userId}", ['step' => 0]);
         $step = $session['step'];
 
+        if ($text === '問題社員チェックリスト') {
+            return $this->textMessage("「問題社員チェックリスト」機能は現在実装予定です。");
+        }
+
+        if ($text === '対応マニュアルDL') {
+            return $this->textMessage("「対応マニュアルDL」機能は現在実装予定です。");
+        }
+
+        if ($text === '無料相談') {
+            return $this->textMessage("「無料相談」機能は現在実装予定です。");
+        }
+
         if (str_contains($text, '診断開始') || str_contains($text, 'はじめる')) {
             cache()->put("diagnosis:{$userId}", ['step' => 1], now()->addHours(1));
-            return "【問題社員リスク診断】\n\nQ1. どのような問題が発生していますか？\n\n1️⃣ スキル・能力不足\n2️⃣ 態度不良・指示不従\n3️⃣ ハラスメント行為\n4️⃣ 勤怠不良（遅刻・欠勤）\n5️⃣ 企業法令・規則違反\n\n番号で答えてください。";
+            return $this->buildQ1Carousel();
         }
 
-        if ($step === 1 && in_array($text, ['1', '2', '3', '4', '5'])) {
-            $problems = [
-                '1' => 'スキル・能力不足',
-                '2' => '態度不良・指示不従',
-                '3' => 'ハラスメント行為',
-                '4' => '勤怠不良',
-                '5' => '企業法令・規則違反',
+        $q1Answers = ['スキル・能力不足', '態度不良・指示不従', 'ハラスメント行為', '勤怠不良', '企業法令・規則違反'];
+        if ($step === 1 && in_array($text, $q1Answers)) {
+            $session = ['step' => 2, 'problem' => $text];
+            cache()->put("diagnosis:{$userId}", $session, now()->addHours(1));
+            return $this->buildQ2Buttons();
+        }
+
+        $q2Answers = ['ある（メール・録音・日報など）', 'ない', '不明・一部のみ'];
+        if ($step === 2 && in_array($text, $q2Answers)) {
+            $evidenceMap = [
+                'ある（メール・録音・日報など）' => true,
+                'ない' => false,
+                '不明・一部のみ' => null,
             ];
-            $session = ['step' => 2, 'problem' => $problems[$text]];
-            cache()->put("diagnosis:{$userId}", $session, now()->addHours(1));
-            return "Q2. 証拠や記録はありますか？\n\n1️⃣ ある（メール・録音・日報など）\n2️⃣ ない\n3️⃣ 不明・一部のみ\n\n番号で答えてください。";
-        }
-
-        if ($step === 2 && in_array($text, ['1', '2', '3'])) {
-            $evidences = ['1' => true, '2' => false, '3' => null];
             $session['step'] = 3;
-            $session['evidence'] = $evidences[$text];
+            $session['evidence'] = $evidenceMap[$text];
             cache()->put("diagnosis:{$userId}", $session, now()->addHours(1));
-            return "Q3. 就業規則はありますか？\n\n1️⃣ ある\n2️⃣ ない\n3️⃣ 不明\n\n番号で答えてください。";
+            return $this->buildQ3Buttons();
         }
 
-        if ($step === 3 && in_array($text, ['1', '2', '3'])) {
-            $hasRules = $text === '1';
+        if ($step === 3 && in_array($text, ['ある', 'ない', '不明'])) {
+            $hasRules = $text === 'ある';
             $result = $this->diagnose($session['problem'], $session['evidence'], $hasRules);
             cache()->forget("diagnosis:{$userId}");
-            return $result;
+            return $this->textMessage($result);
         }
 
-        return "「診断開始」と送ると問題社員リスク診断が始まります。";
+        return $this->textMessage("下のメニューから「診断開始」をタップしてください。");
+    }
+
+    private function buildQ1Carousel(): TemplateMessage
+    {
+        $cards = [
+            ['text' => 'スキル・能力不足',   'img' => 'q1_skill.jpg'],
+            ['text' => '態度不良・指示不従',  'img' => 'q1_attitude.jpg'],
+            ['text' => 'ハラスメント行為',    'img' => 'q1_harassment.jpg'],
+            ['text' => '勤怠不良',           'img' => 'q1_attendance.jpg'],
+            ['text' => '企業法令・規則違反',  'img' => 'q1_violation.jpg'],
+        ];
+
+        $columns = array_map(fn($card) => new CarouselColumn([
+            'imageUrl' => "{$this->baseUrl}/img/{$card['img']}",
+            'title' => $card['text'],
+            'text' => 'タップして選択',
+            'actions' => [
+                new MessageAction([
+                    'type' => 'message',
+                    'label' => $card['text'],
+                    'text' => $card['text'],
+                ]),
+            ],
+        ]), $cards);
+
+        return new TemplateMessage([
+            'type' => 'template',
+            'altText' => 'Q1. どのような問題が発生していますか？',
+            'template' => new CarouselTemplate([
+                'type' => 'carousel',
+                'columns' => $columns,
+                'imageAspectRatio' => 'square',
+                'imageSize' => 'cover',
+            ]),
+        ]);
+    }
+
+    private function buildQ2Buttons(): TemplateMessage
+    {
+        return new TemplateMessage([
+            'type' => 'template',
+            'altText' => 'Q2. 証拠や記録はありますか？',
+            'template' => new ButtonsTemplate([
+                'type' => 'buttons',
+                'imageUrl' => "{$this->baseUrl}/img/q2_evidence.jpg",
+                'imageAspectRatio' => 'square',
+                'imageSize' => 'cover',
+                'title' => 'Q2. 証拠・記録の有無',
+                'text' => '証拠や記録はありますか？',
+                'actions' => [
+                    new MessageAction(['type' => 'message', 'label' => 'ある（メール・録音・日報など）', 'text' => 'ある（メール・録音・日報など）']),
+                    new MessageAction(['type' => 'message', 'label' => 'ない', 'text' => 'ない']),
+                    new MessageAction(['type' => 'message', 'label' => '不明・一部のみ', 'text' => '不明・一部のみ']),
+                ],
+            ]),
+        ]);
+    }
+
+    private function buildQ3Buttons(): TemplateMessage
+    {
+        return new TemplateMessage([
+            'type' => 'template',
+            'altText' => 'Q3. 就業規則はありますか？',
+            'template' => new ButtonsTemplate([
+                'type' => 'buttons',
+                'imageUrl' => "{$this->baseUrl}/img/q3_rules.jpg",
+                'imageAspectRatio' => 'square',
+                'imageSize' => 'cover',
+                'title' => 'Q3. 就業規則の有無',
+                'text' => '就業規則はありますか？',
+                'actions' => [
+                    new MessageAction(['type' => 'message', 'label' => 'ある', 'text' => 'ある']),
+                    new MessageAction(['type' => 'message', 'label' => 'ない', 'text' => 'ない']),
+                    new MessageAction(['type' => 'message', 'label' => '不明', 'text' => '不明']),
+                ],
+            ]),
+        ]);
     }
 
     private function diagnose(string $problem, ?bool $evidence, bool $hasRules): string
@@ -128,26 +215,27 @@ class LineBotController extends Controller
         if ($isHighRisk) $score += 2;
 
         if ($score >= 4) {
-            $rank = 'A';
             $rankText = "【Aランク：弁護士相談を強く推薦】\n⚠️ 法的リスクが高く、対応を誤ると会社側が不利になる可能性があります。早急に弁護士へ相談することをお勧めします。";
         } elseif ($score >= 2) {
-            $rank = 'B';
             $rankText = "【Bランク：社内対応＋専門家確認を推薦】\n⚠️ 対応次第でリスクが増減します。就業規則の整備と証拠収集を進めながら、必要に応じて専門家に確認しましょう。";
         } else {
-            $rank = 'C';
             $rankText = "【Cランク：まず社内対応・記録整備を】\n📝 現時点では法的リスクは比較的低めです。指導記録の整備と就業規則の確認から始めましょう。";
         }
 
-        return "━━━━━━━━━━━━\n📊 診断結果\n━━━━━━━━━━━━\n\n問題種別：{$problem}\n\n{$rankText}\n\n━━━━━━━━━━━━\n\n再度診断する場合は「診断開始」と送ってください。";
+        return "━━━━━━━━━━━━\n📊 診断結果\n━━━━━━━━━━━━\n\n問題種別：{$problem}\n\n{$rankText}\n\n━━━━━━━━━━━━\n\n再度診断する場合は下のメニューから「診断開始」をタップしてください。";
     }
 
-    private function replyMessage(string $replyToken, TextMessage $message): void
+    private function textMessage(string $text): TextMessage
     {
-        $request = new ReplyMessageRequest([
+        return new TextMessage(['type' => 'text', 'text' => $text]);
+    }
+
+    private function replyMessage(string $replyToken, TextMessage|TemplateMessage $message): void
+    {
+        $this->bot->replyMessage(new ReplyMessageRequest([
             'replyToken' => $replyToken,
             'messages' => [$message],
-        ]);
-        $this->bot->replyMessage($request);
+        ]));
     }
 
     private function validateSignature(string $body, string $secret, ?string $signature): bool
